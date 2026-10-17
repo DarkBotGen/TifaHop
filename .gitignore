@@ -1,0 +1,7 @@
+relay-token.txt
+room-settings.json
+*.log
+*.pid
+__pycache__/
+ready/
+*TifaHop-connection*
