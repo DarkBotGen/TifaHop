@@ -62,36 +62,41 @@ cfg.searchhold = number(cfg.searchhold, 10, 600, "searchhold")
 cfg.fighttimeout = number(cfg.fighttimeout, 10, 900, "fighttimeout")
 assert(cfg.minlvl % 1 == 0 and cfg.maxlvl % 1 == 0, "Levels must be integers")
 assert(cfg.role == "main" or cfg.role == "searcher", "role must be main or searcher")
-assert(type(cfg.relaytoken) == "string" and #cfg.relaytoken >= 24, "Set relaytoken from relay-token.txt")
+local startupIssues = {}
+if type(cfg.relaytoken) ~= "string" or #cfg.relaytoken < 24 then
+	table.insert(startupIssues, "LAN connection missing. Run the private Main/Alt launcher once on this account.")
+end
 assert(type(cfg.room) == "string" and #cfg.room > 0 and #cfg.room <= 100, "Invalid room")
 for _, key in ipairs({"onlygifted", "mainwait", "activate", "autoload"}) do
 	assert(type(cfg[key]) == "boolean", key .. " must be true or false")
 end
 local requestFn = (syn and syn.request) or http_request or request or (http and http.request)
-assert(type(requestFn) == "function", "Executor HTTP request support is required")
+if type(requestFn) ~= "function" then table.insert(startupIssues, "Executor HTTP request support is unavailable.") end
 assert(type(cfg.relay) == "string" and cfg.relay:match("^https?://"), "Set relay to your LAN relay URL")
 cfg.relay = cfg.relay:gsub("/+$", "")
-if type(writefile) == "function" then
+if type(writefile) == "function" and #startupIssues == 0 then
 	pcall(function() writefile(connectionPath, Http:JSONEncode({relay = cfg.relay,
 		relaytoken = cfg.relaytoken, room = cfg.room, role = cfg.role})) end)
 end
 local queuedSource
 local queueFn = queue_on_teleport or (syn and syn.queue_on_teleport)
 if cfg.autoload then
-	assert(type(queueFn) == "function", "Automatic hopping requires queue_on_teleport support")
+	if type(queueFn) ~= "function" then
+		table.insert(startupIssues, "Executor queue_on_teleport support is unavailable. Set autoload=false for manual hopping.")
+	end
 	if type(env.vh_embedded_source) == "string" and #env.vh_embedded_source > 100 then
 		queuedSource = env.vh_embedded_source
 	else
-		assert(type(readfile) == "function", "Use the self-contained script or provide readfile support")
-		local ok, source = pcall(readfile, cfg.sourcepath)
-		assert(ok and type(source) == "string" and #source > 100, "Save client.luau at " .. cfg.sourcepath)
-		queuedSource = source
+		local ok, source = pcall(function() return readfile(cfg.sourcepath) end)
+		if ok and type(source) == "string" and #source > 100 then queuedSource = source
+		else table.insert(startupIssues, "Client source unavailable for automatic continuation. Use the GitHub loader.") end
 	end
 end
 
 if env.ViciousHop and env.ViciousHop.Stop then env.ViciousHop.Stop() end
 local state = {running = true, connections = {}, collisions = {}, visited = {}, ignored = {},
 	cooldowns = setmetatable({}, {__mode = "k"}), counted = setmetatable({}, {__mode = "k"}), status = "Starting"}
+state.startupError = if #startupIssues > 0 then table.concat(startupIssues, " ") else nil
 if type(env.vh_visited) == "table" then
 	for job, timestamp in pairs(env.vh_visited) do
 		if type(job) == "string" and type(timestamp) == "number" and os.time() - timestamp < 1800 then
@@ -465,6 +470,7 @@ local function searcherStep()
 end
 
 task.spawn(function()
+	if state.startupError then return end
 	local ok, err = xpcall(function()
 		workspace:WaitForChild("Monsters", 60)
 		workspace:WaitForChild("FlowerZones", 60)
@@ -489,9 +495,9 @@ task.spawn(function()
 	end, debug.traceback)
 	if not ok then state.Stop(); warn("[TifaHop] " .. tostring(err)) end
 end)
-status(if cfg.role == "main" then "Waiting for searchers" else "Scanning server")
+status(state.startupError or (if cfg.role == "main" then "Waiting for searchers" else "Scanning server"))
 task.spawn(function()
-	while state.running do pcall(syncSettings); task.wait(3) end
+	while state.running do if not state.startupError then pcall(syncSettings) end; task.wait(3) end
 end)
 -- TIFASKI_UI_BEGIN
 -- Atlas widget definitions with a responsive compact Info/Settings shell.
@@ -558,7 +564,21 @@ end
 	end
 	local function connect(signal, fn) table.insert(links, signal:Connect(fn)) end
 	local gui = make("ScreenGui", {Name = "TifaskiHop", ResetOnSpawn = false, IgnoreGuiInset = true, ScreenInsets = Enum.ScreenInsets.None,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling}, gethui and gethui() or game:GetService("CoreGui"))
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling}, nil)
+	local parented = false
+	for _, candidate in ipairs({
+		function() return gethui and gethui() end,
+		function() return game:GetService("CoreGui") end,
+		function() return game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui", 10) end,
+	}) do
+		local ok = pcall(function()
+			local parent = candidate()
+			assert(parent, "UI parent unavailable")
+			gui.Parent = parent
+		end)
+		if ok then parented = true; break end
+	end
+	assert(parented, "Executor denied UI parenting, including PlayerGui")
 	local host = make("Frame", {Name = "ResponsivePosition", BackgroundTransparency = 1, Size = UDim2.fromOffset(0, 0)}, gui)
 	local window = make("Frame", {Name = "Window", Size = logicalOffset(300, 328), Position = UDim2.fromOffset(0, 0),
 		BackgroundColor3 = Color3.fromRGB(21, 22, 23), BorderSizePixel = 0, ClipsDescendants = true, Active = true}, host)
@@ -616,6 +636,8 @@ end
 	button(info, "Copy discord", 8, 21, 68, function() if type(setclipboard) == "function" then setclipboard(discord) end end)
 	text(info, "open ticket in discord for help", 8, 37, 280, 15)
 	labels.status = text(info, "Starting", 8, 72, 285, 15)
+	labels.status.TextWrapped = true
+	if state.startupError then labels.status.Size = logicalOffset(285, 42); labels.status.Position = logicalOffset(8, 58) end
 	labels.room = text(info, "Room: " .. cfg.room .. " [" .. (if cfg.role == "searcher" then "alt" else "main") .. "]", 8, 89, 285, 15)
 	local rows = {{"sessionStingers", "Session stingers: 0"}, {"totalStingers", "Total stingers: 0"},
 		{"sessionKills", "Session kills: 0"}, {"totalKills", "All time kills: 0"}, {"rate", "Stingers per hour: 0"},
